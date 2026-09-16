@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>HomeDash Face Access</title>
+<script src="https://cdn.jsdelivr.net/npm/@vladmandic/human@3.3.6/dist/human.js"></script>
+<style>
+:root{font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display","Segoe UI",sans-serif;background:#f5f5f3;color:#111}
+*{box-sizing:border-box}body{margin:0;padding:24px}.app{max-width:1100px;margin:auto}.top{display:flex;justify-content:space-between;align-items:end;margin-bottom:18px}
+.k{font-size:11px;font-weight:800;letter-spacing:.14em;color:#888}.h{font-size:42px;font-weight:800;letter-spacing:-.05em;margin-top:4px}
+.badge{padding:9px 12px;border:1px solid #ddd;border-radius:999px;background:#fff;font-size:12px;font-weight:700}
+.grid{display:grid;grid-template-columns:1.6fr .8fr;gap:16px}.card{background:#fff;border:1px solid #deded8;border-radius:22px;padding:16px;box-shadow:0 12px 35px #00000008}
+.head{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px}.title{font-size:18px;font-weight:800}
+.camera{position:relative;aspect-ratio:4/3;background:#080808;border-radius:17px;overflow:hidden}
+video,canvas{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}video,canvas{transform:scaleX(-1)}
+.info{display:flex;justify-content:space-between;align-items:center;padding:14px 2px}.name{font-size:22px;font-weight:800}.score{font-size:22px;font-weight:800}
+button,input,select{font:inherit}button{border:0;border-radius:13px;padding:12px 14px;font-weight:800;cursor:pointer}
+.primary{background:#111;color:white}.secondary{background:#efefeb;color:#111}.row{display:flex;gap:8px}.full{width:100%}
+input,select{width:100%;border:1px solid #d8d8d2;border-radius:12px;padding:12px;background:white;outline:none}
+label{display:block;font-size:12px;font-weight:750;margin:14px 0 7px}.hint{font-size:12px;color:#777;line-height:1.45}
+.list{margin-top:10px}.item{display:grid;grid-template-columns:1fr auto;gap:8px;padding:11px 4px;border-top:1px solid #eee}.item:first-child{border-top:0}.meta{font-size:11px;color:#888;margin-top:3px}
+.logs{margin-top:16px}.event{display:grid;grid-template-columns:1fr auto auto;gap:12px;padding:12px 2px;border-top:1px solid #eee;align-items:center}.event:first-child{border-top:0}
+.ok{color:#13864b}.err{color:#c33}.small{font-size:12px}.statusline{min-height:18px;font-size:12px;font-weight:700;margin-top:10px}
+@media(max-width:760px){body{padding:14px}.grid{grid-template-columns:1fr}.h{font-size:34px}.event{grid-template-columns:1fr auto}.event .sim{display:none}}
+</style>
+</head>
+<body>
+<div class="app">
+  <div class="top">
+    <div><div class="k">HOMEDASH</div><div class="h">Face Access</div></div>
+    <div class="badge" id="sys">Ready</div>
+  </div>
+
+  <div class="grid">
+    <section class="card">
+      <div class="head">
+        <div><div class="k">LIVE CAMERA</div><div class="title">Entrance Recognition</div></div>
+        <select id="mode" style="width:auto"><option value="IN">Check in</option><option value="OUT">Check out</option></select>
+      </div>
+      <div class="camera"><video id="video" autoplay muted playsinline></video><canvas id="canvas"></canvas></div>
+      <div class="info">
+        <div><div class="k">IDENTITY</div><div class="name" id="who">Waiting</div></div>
+        <div class="score" id="score">—</div>
+      </div>
+      <div class="row">
+        <button class="primary" id="start">Start camera</button>
+        <button class="secondary" id="stop">Stop</button>
+      </div>
+    </section>
+
+    <aside>
+      <section class="card">
+        <div class="k">ENROLLMENT</div><div class="title">Register member</div>
+        <label>Name</label><input id="memberName" placeholder="e.g. Elio Kim">
+        <button class="primary full" id="register" style="margin-top:10px">Capture face & register</button>
+        <div class="hint">One clear face only. Face templates and logs stay in this browser's local storage.</div>
+        <div class="statusline" id="msg"></div>
+      </section>
+
+      <section class="card" style="margin-top:16px">
+        <div class="k">MEMBERS</div><div class="title" id="memberTitle">0 enrolled</div>
+        <div class="list" id="members"></div>
+      </section>
+    </aside>
+  </div>
+
+  <section class="card logs">
+    <div class="head"><div><div class="k">ATTENDANCE</div><div class="title">Recent access</div></div><button class="secondary small" id="clearLogs">Clear logs</button></div>
+    <div id="logs"></div>
+  </section>
+</div>
+
+<script>
+if (!window.isSecureContext) {
+  document.addEventListener('DOMContentLoaded', () => {
+    const sys = document.getElementById('sys');
+    if (sys) {
+      sys.textContent = 'HTTPS required';
+      sys.className = 'badge err';
+    }
+    const msg = document.getElementById('msg');
+    if (msg) {
+      msg.textContent = 'Open this app from an HTTPS URL. iPad VS Code local preview cannot use the camera.';
+      msg.className = 'statusline err';
+    }
+  });
+}
+const $=id=>document.getElementById(id);
+const video=$('video'), canvas=$('canvas'), ctx=canvas.getContext('2d');
+const KEY_MEM='homedash_members_v1', KEY_LOG='homedash_logs_v1';
+let members=JSON.parse(localStorage.getItem(KEY_MEM)||'[]');
+let logs=JSON.parse(localStorage.getItem(KEY_LOG)||'[]');
+let stream=null,running=false,busy=false,lastSeen={id:null,at:0},stable={id:null,n:0};
+
+const human=new Human.Human({
+  backend:'webgl',
+  modelBasePath:'https://cdn.jsdelivr.net/npm/@vladmandic/human@3.3.6/models/',
+  cacheSensitivity:0.01,
+  filter:{enabled:true,equalization:true},
+  face:{
+    enabled:true,
+    detector:{enabled:true,rotation:true,maxDetected:1,minConfidence:0.6},
+    mesh:{enabled:true},
+    description:{enabled:true},
+    iris:{enabled:false},
+    emotion:{enabled:false},
+    antispoof:{enabled:false},
+    liveness:{enabled:false}
+  },
+  body:{enabled:false},hand:{enabled:false},object:{enabled:false},gesture:{enabled:false}
+});
+
+function save(){localStorage.setItem(KEY_MEM,JSON.stringify(members));localStorage.setItem(KEY_LOG,JSON.stringify(logs))}
+function esc(s){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
+function status(t,cls=''){$('sys').textContent=t;$('sys').className='badge '+cls}
+function render(){
+  $('memberTitle').textContent=`${members.length} enrolled`;
+  $('members').innerHTML=members.length?members.map(m=>`<div class="item"><div><b>${esc(m.name)}</b><div class="meta">${new Date(m.createdAt).toLocaleString()}</div></div><button class="secondary small" onclick="removeMember('${m.id}')">Remove</button></div>`).join(''):'<div class="hint">No members yet.</div>';
+  $('logs').innerHTML=logs.length?logs.slice().reverse().map(l=>`<div class="event"><div><b>${esc(l.name)}</b><div class="meta">${new Date(l.time).toLocaleString()}</div></div><b>${l.type}</b><span class="sim">${Math.round(l.similarity*100)}%</span></div>`).join(''):'<div class="hint">No access events yet.</div>';
+}
+window.removeMember=id=>{members=members.filter(m=>m.id!==id);save();render()};
+
+async function startCamera(){
+  status('Loading models…');
+  await human.load();
+  if(!stream){
+    stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:'user',width:{ideal:1280},height:{ideal:960}},audio:false});
+    video.srcObject=stream; await video.play();
+    canvas.width=video.videoWidth||1280; canvas.height=video.videoHeight||960;
+  }
+  status('Recognition active','ok'); running=true; loop();
+}
+function stopCamera(){running=false;stream?.getTracks().forEach(t=>t.stop());stream=null;video.srcObject=null;ctx.clearRect(0,0,canvas.width,canvas.height);status('Stopped');$('who').textContent='Waiting';$('score').textContent='—'}
+
+function bestMatch(embedding){
+  if(!members.length)return null;
+  const descriptors=members.map(m=>m.embedding);
+  const r=human.match.find(embedding,descriptors,{order:2,multiplier:1000,min:0,max:1});
+  const m=members[r.index];
+  return m?{...m,similarity:r.similarity}:null;
+}
+function draw(face,good){
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+  if(!face?.box)return;
+  const [x,y,w,h]=face.box;ctx.lineWidth=4;ctx.strokeStyle=good?'#42e389':'#fff';ctx.strokeRect(x,y,w,h);
+}
+async function detect(){
+  if(!running||busy||!stream||video.readyState<2)return;
+  busy=true;
+  try{
+    const r=await human.detect(video),face=r.face?.[0];
+    if(!face?.embedding){$('who').textContent='No clear face';$('score').textContent='—';draw(face,false);stable={id:null,n:0};return}
+    const match=bestMatch(face.embedding),threshold=.50,good=match&&match.similarity>=threshold;
+    draw(face,good);
+    if(!good){$('who').textContent=members.length?'Unknown person':'Register member first';$('score').textContent=match?Math.round(match.similarity*100)+'%':'—';stable={id:null,n:0};return}
+    $('who').textContent=match.name;$('score').textContent=Math.round(match.similarity*100)+'%';
+    if(stable.id===match.id)stable.n++;else stable={id:match.id,n:1};
+    if(stable.n>=3){
+      stable.n=0;
+      const now=Date.now();
+      if(!(lastSeen.id===match.id&&now-lastSeen.at<30000)){
+        lastSeen={id:match.id,at:now};
+        const type=$('mode').value==='OUT'?'CHECK OUT':'CHECK IN';
+        logs.push({id:crypto.randomUUID(),memberId:match.id,name:match.name,type,similarity:match.similarity,time:new Date().toISOString()});
+        save();render();status(`${match.name} · ${type}`,'ok');
+      }
+    }
+  }catch(e){console.error(e);status('Recognition error','err')}
+  finally{busy=false}
+}
+async function loop(){while(running){await detect();await new Promise(r=>setTimeout(r,850))}}
+
+$('start').onclick=async()=>{try{await startCamera()}catch(e){console.error(e);status('Camera blocked','err');$('msg').textContent='Camera permission or HTTPS preview is required.';$('msg').className='statusline err'}};
+$('stop').onclick=stopCamera;
+$('register').onclick=async()=>{
+  const name=$('memberName').value.trim(),msg=$('msg');msg.textContent='';msg.className='statusline';
+  if(!name){msg.textContent='Enter a name.';msg.classList.add('err');return}
+  try{
+    await human.load();
+    if(!stream){stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:'user'},audio:false});video.srcObject=stream;await video.play()}
+    const r=await human.detect(video),face=r.face?.[0];
+    if(!face?.embedding)throw new Error('No clear face detected.');
+    if(members.some(m=>m.name.toLowerCase()===name.toLowerCase()))throw new Error('Name already exists.');
+    members.push({id:crypto.randomUUID(),name,embedding:Array.from(face.embedding),createdAt:new Date().toISOString()});
+    save();render();$('memberName').value='';msg.textContent=`${name} registered.`;msg.classList.add('ok');
+  }catch(e){msg.textContent=e.message;msg.classList.add('err')}
+};
+$('clearLogs').onclick=()=>{if(confirm('Clear attendance logs?')){logs=[];save();render()}};
+render();
+</script>
+</body>
+</html>
